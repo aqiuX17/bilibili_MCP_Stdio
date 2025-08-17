@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "bilibili-server": {
+      "command": "python",
+      "args": ["main.py"],
+      "cwd": "/Users/octopus/Downloads/mcpnormol",
+      "env": {
+        "PYTHONPATH": "/Users/octopus/Downloads/mcpnormol"
+      }
+    }
+  }
+}
