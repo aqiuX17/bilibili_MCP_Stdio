@@ -6,7 +6,8 @@
 
 这是一个基于 FastMCP 的 B站信息获取服务器，支持通过 stdio 协议与 MCP 客户端通信，可以获取B站的各种信息，包括视频信息、用户信息、搜索功能等。
 ## 预览
-https://github.com/aqiuX17/bilibili_MCP_Stdio/blob/main/B%E7%AB%99%E7%94%A8%E6%88%B7%E6%8A%80%E6%9C%AF%E7%88%AC%E7%88%AC%E8%99%BE%E4%BF%A1%E6%81%AF%E6%9F%A5%E8%AF%A2.png
+![Uploading B站用户技术爬爬虾信息查询.png…]()
+
 
 ## 🚀 最新更新
 
