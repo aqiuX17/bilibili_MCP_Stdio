@@ -56,8 +56,8 @@ class BilibiliAPI:
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
         self.last_request_time = 0  # 上次请求时间
-        self.min_interval = 2.0  # 最小请求间隔（增加到2秒）
-        self.max_interval = 5.0  # 最大请求间隔（增加到5秒）
+        self.min_interval = 5.0  # 最小请求间隔（增加到5秒）
+        self.max_interval = 10.0  # 最大请求间隔（增加到10秒）
         
         # WBI相关参数
         self.wbi_img_key = ""
@@ -96,23 +96,68 @@ class BilibiliAPI:
         )
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
+        
+        # 确保session支持自动解压缩
+        self.session.headers.update({
+            'Accept-Encoding': 'gzip, deflate, br'  # 明确支持压缩格式
+        })
     
     def _load_cookies_from_file(self) -> Optional[Dict[str, str]]:
-        """从cookie_example.json文件加载cookie配置"""
+        """从cookie文件加载cookie配置（优先加载真实cookie）"""
         try:
             import os
-            cookie_file = os.path.join(os.path.dirname(__file__), 'cookie_example.json')
-            if os.path.exists(cookie_file):
-                with open(cookie_file, 'r', encoding='utf-8') as f:
-                    cookies = json.load(f)
-                logger.info(f"从 {cookie_file} 加载了 {len(cookies)} 个cookie")
-                return cookies
-            else:
-                logger.info("未找到 cookie_example.json 文件")
-                return None
+            
+            # 优先查找真实的cookie文件
+            cookie_files = [
+                'cookies.json',           # 真实cookie文件
+                'bilibili_cookies.json',  # 备选名称
+                'cookie.json',            # 简化名称
+                'cookie_example.json'     # 示例文件（最后选择）
+            ]
+            
+            for cookie_filename in cookie_files:
+                cookie_file = os.path.join(os.path.dirname(__file__), cookie_filename)
+                if os.path.exists(cookie_file):
+                    with open(cookie_file, 'r', encoding='utf-8') as f:
+                        cookies = json.load(f)
+                    
+                    # 检查是否是示例cookie（包含占位符）
+                    if cookie_filename == 'cookie_example.json':
+                        # 检查是否包含占位符
+                        if any('your_' in str(value) or 'here' in str(value) for value in cookies.values()):
+                            logger.warning(f"检测到示例cookie文件 {cookie_file}，这些cookie无效")
+                            logger.warning("请创建真实的cookie文件（cookies.json）或使用set_bilibili_cookies工具设置")
+                            return None  # 不使用示例cookie
+                    
+                    logger.info(f"从 {cookie_file} 加载了 {len(cookies)} 个cookie")
+                    
+                    # 验证关键cookie是否有效
+                    if self._validate_cookies(cookies):
+                        return cookies
+                    else:
+                        logger.warning(f"{cookie_file} 中的cookie可能无效")
+                        continue
+            
+            logger.info("未找到有效的cookie文件")
+            return None
         except Exception as e:
             logger.warning(f"加载cookie文件失败: {e}")
             return None
+    
+    def _validate_cookies(self, cookies: Dict[str, str]) -> bool:
+        """验证cookie是否有效（简单检查）"""
+        try:
+            # 检查关键cookie是否存在且不是占位符
+            critical_cookies = ["SESSDATA", "bili_jct", "buvid3"]
+            for cookie_name in critical_cookies:
+                if cookie_name not in cookies:
+                    return False
+                value = str(cookies[cookie_name])
+                if not value or 'your_' in value or 'here' in value or len(value) < 10:
+                    return False
+            return True
+        except Exception:
+            return False
     
     def _get_enhanced_headers(self) -> Dict[str, str]:
         """获取增强的请求头（基于真实抓包数据）"""
@@ -350,38 +395,82 @@ class BilibiliAPI:
     def _parse_response(self, response) -> Optional[Dict]:
         """解析响应内容（处理B站反爬措施，参考Nemo2011/bilibili-api）"""
         try:
+            # 检查HTTP状态码
+            if response.status_code != 200:
+                logger.warning(f"HTTP错误: {response.status_code}")
+                return {"error": f"HTTP错误: {response.status_code}", "status_code": response.status_code}
+            
             # 检查内容类型
             content_type = response.headers.get('content-type', '')
+            logger.debug(f"响应内容类型: {content_type}")
             
-            # 获取响应文本
-            response_text = response.text.strip()
+            # 获取响应文本，确保正确解码
+            try:
+                # 尝试使用response.text（自动解码）
+                response_text = response.text.strip()
+            except UnicodeDecodeError:
+                # 如果自动解码失败，尝试手动解码
+                response_text = response.content.decode('utf-8', errors='ignore').strip()
+            
+            # 检查是否为空响应
+            if not response_text:
+                logger.warning("收到空响应")
+                return {"error": "空响应", "content_type": content_type}
+            
+            # 记录响应的前几个字符用于调试
+            logger.debug(f"响应前50字符: {response_text[:50]}")
             
             # 处理B站可能在JSON前添加的反爬字符（参考Nemo2011/bilibili-api）
-            if response_text.startswith('!{') or response_text.startswith('!［{'):
+            original_text = response_text
+            
+            # 检查是否有反爬字符，只有在确认是文本字符时才处理
+            if response_text.startswith('!{'):
                 response_text = response_text[1:]  # 去掉开头的感叹号
-                logger.debug("检测到反爬字符，已自动处理")
+                logger.debug("检测到反爬字符 !{，已自动处理")
+            elif response_text.startswith('!［{'):
+                response_text = response_text[2:]  # 去掉开头的 !［
+                logger.debug("检测到反爬字符 !［{，已自动处理")
             elif response_text.startswith('］{'):
-                response_text = response_text[1:]  # 去掉开头的其他字符
-                logger.debug("检测到其他反爬字符，已自动处理")
-            elif response_text.startswith('!'):
-                # 处理其他可能的反爬前缀
+                response_text = response_text[1:]  # 去掉开头的 ］
+                logger.debug("检测到反爬字符 ］{，已自动处理")
+            elif response_text.startswith('!') and len(response_text) > 1 and response_text[1] in '{["':
+                # 只有当感叹号后面跟着JSON起始字符时才处理
                 response_text = response_text[1:]
                 logger.debug("检测到感叹号前缀，已自动处理")
+            
+            # 如果处理后的文本明显不是JSON，恢复原文本
+            if not response_text.strip().startswith(('{', '[')):
+                logger.debug("处理反爬字符后不是有效JSON，恢复原文本")
+                response_text = original_text
             
             # 尝试解析JSON
             if 'application/json' in content_type or response_text.startswith('{'):
                 try:
                     result = json.loads(response_text)
-                    logger.debug(f"JSON解析成功")
+                    logger.debug(f"JSON解析成功，code: {result.get('code', 'N/A')}")
                     return result
                 except json.JSONDecodeError as e:
                     logger.warning(f"JSON解析失败: {e}")
-                    logger.debug(f"原始响应前200字符: {response.text[:200]}")
-                    return {"html_content": response.text, "parse_error": str(e)}
+                    logger.warning(f"原始响应前200字符: {original_text[:200]}")
+                    # 检查是否是被压缩或编码的内容
+                    if response.headers.get('content-encoding'):
+                        logger.warning(f"响应可能被压缩: {response.headers.get('content-encoding')}")
+                    return {"html_content": original_text, "parse_error": str(e), "content_type": content_type}
             else:
-                # 返回HTML内容
-                logger.debug(f"返回HTML内容")
-                return {"html_content": response.text, "content_type": content_type}
+                # 检查是否是HTML重定向或错误页面
+                if response_text.startswith('<!DOCTYPE') or response_text.startswith('<html'):
+                    logger.warning("收到HTML响应，可能是错误页面或重定向")
+                    # 尝试从HTML中提取错误信息
+                    if '403' in response_text or 'Forbidden' in response_text:
+                        return {"error": "访问被拒绝（403），可能需要更新cookie或降低请求频率", "status_code": 403}
+                    elif '404' in response_text or 'Not Found' in response_text:
+                        return {"error": "资源未找到（404）", "status_code": 404}
+                    else:
+                        return {"error": "收到HTML响应而非JSON", "html_content": response_text[:500], "content_type": content_type}
+                else:
+                    # 返回其他类型内容
+                    logger.debug(f"返回非JSON内容，类型: {content_type}")
+                    return {"html_content": response_text, "content_type": content_type}
                 
         except Exception as e:
             logger.error(f"响应解析异常: {e}")
@@ -850,17 +939,45 @@ class BilibiliAPI:
             }
     
     def get_video_stat(self, bvid: str) -> Dict:
-        """获取视频统计信息（基于bilibili-API-collect）"""
+        """获取视频统计信息（基于bilibili-API-collect，从视频基础信息中提取）"""
         try:
-            url = "https://api.bilibili.com/x/web-interface/archive/stat"
-            params = {"bvid": bvid}
+            # 使用基础视频信息API，它包含完整的统计信息
+            video_info = self.get_video_info(bvid)
             
-            headers = {
-                "Referer": f"https://www.bilibili.com/video/{bvid}",
-                "Origin": "https://www.bilibili.com"
+            if not video_info or video_info.get('code') != 0:
+                return video_info or {"code": -1, "message": "获取视频信息失败"}
+            
+            # 提取统计信息
+            data = video_info.get('data', {})
+            stat = data.get('stat', {})
+            
+            if not stat:
+                return {
+                    "code": -1,
+                    "message": "视频信息中未找到统计数据",
+                    "data": {}
+                }
+            
+            # 返回格式化的统计信息
+            return {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "bvid": bvid,
+                    "aid": data.get('aid'),
+                    "title": data.get('title'),
+                    "stat": stat,
+                    "formatted_stat": {
+                        "播放量": stat.get('view', 0),
+                        "弹幕数": stat.get('danmaku', 0),
+                        "评论数": stat.get('reply', 0),
+                        "点赞数": stat.get('like', 0),
+                        "投币数": stat.get('coin', 0),
+                        "收藏数": stat.get('favorite', 0),
+                        "分享数": stat.get('share', 0)
+                    }
+                }
             }
-            
-            return self._make_request(url, params=params, headers=headers)
             
         except Exception as e:
             logger.error(f"获取视频统计失败: {e}")
@@ -1945,19 +2062,43 @@ def get_cookie_status() -> str:
     Returns:
         cookie状态信息
     """
-    if BILIBILI_COOKIES:
+    # 检查全局cookie变量和API实例的cookie
+    global_cookies = BILIBILI_COOKIES
+    api_cookies = dict(bili_api.session.cookies) if bili_api.session.cookies else {}
+    
+    # 合并所有cookie信息
+    all_cookies = {**global_cookies, **api_cookies}
+    
+    if all_cookies:
         cookie_info = []
-        for key, value in BILIBILI_COOKIES.items():
-            # 隐藏敏感信息
-            if len(value) > 8:
-                masked_value = value[:4] + "*" * (len(value) - 8) + value[-4:]
-            else:
-                masked_value = "*" * len(value)
-            cookie_info.append(f"{key}: {masked_value}")
+        critical_cookies = ["SESSDATA", "bili_jct", "buvid3"]
         
-        return f"Cookie已设置，共{len(BILIBILI_COOKIES)}个键值对:\n" + "\n".join(cookie_info)
+        for key, value in all_cookies.items():
+            # 隐藏敏感信息
+            if len(str(value)) > 8:
+                masked_value = str(value)[:4] + "*" * (len(str(value)) - 8) + str(value)[-4:]
+            else:
+                masked_value = "*" * len(str(value))
+            
+            # 标记关键cookie
+            marker = " [关键]" if key in critical_cookies else ""
+            cookie_info.append(f"{key}: {masked_value}{marker}")
+        
+        # 检查cookie有效性
+        missing_critical = [c for c in critical_cookies if c not in all_cookies]
+        validity_info = ""
+        if missing_critical:
+            validity_info = f"\n⚠️ 缺少关键cookie: {', '.join(missing_critical)}"
+        else:
+            # 检查是否是示例cookie
+            if any('your_' in str(value) or 'here' in str(value) for value in all_cookies.values()):
+                validity_info = "\n⚠️ 检测到示例cookie，请设置真实的cookie"
+            else:
+                validity_info = "\n✅ 关键cookie配置完整"
+        
+        return f"Cookie已设置，共{len(all_cookies)}个键值对:{validity_info}\n\n" + "\n".join(cookie_info)
     else:
-        return "Cookie未设置，建议设置cookie以避免反爬限制"
+        return "Cookie未设置，建议设置cookie以避免反爬限制\n\n💡 使用 set_bilibili_cookies 工具设置cookie，或创建 cookies.json 文件"
 
 @mcp.tool()
 def test_connection() -> str:
